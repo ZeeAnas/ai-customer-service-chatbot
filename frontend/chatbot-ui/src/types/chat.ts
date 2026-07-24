@@ -1,11 +1,18 @@
-export type ChatRequest = {
-    message: string;
-  };
-  
-  export type ChatResponse = {
-    reply: string;
-  };
-  export type ApiError = {
-    error?: string;
-    traceId?: string;
-  };
+export type ChatRole = "user" | "assistant";
+
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+}
+
+export interface ChatRequest {
+  messages: ChatMessage[];
+}
+
+export interface ChatResponse {
+  reply: string;
+}
+export type ApiError = {
+  error?: string;
+  traceId?: string;
+};

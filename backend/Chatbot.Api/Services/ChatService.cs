@@ -5,6 +5,7 @@ using Chatbot.Api.Configuration;
 using Chatbot.Api.Interfaces;
 using Microsoft.Extensions.Options;
 using Chatbot.Api.Exceptions;
+using Chatbot.Api.Models.Requests;
 
 namespace Chatbot.Api.Services;
 
@@ -77,7 +78,7 @@ public class ChatService : IChatService
     }
 
     public async Task<string> GetReplyAsync(
-    string message,
+    List<ChatMessageRequest> messages,
     CancellationToken cancellationToken)
 {
     ValidateConfiguration();
@@ -97,12 +98,27 @@ public class ChatService : IChatService
             "Bearer",
             _options.ApiKey
         );
+    
+    var openAiMessages = messages.Select(message => new
+    {
+        role = message.Role,
+        content = new[]
+        {
+            new
+            {
+               type = message.Role == "assistant"
+               ? "output_text"
+               : "input_text",
+               text = message.Content
+            }
+        }
+    }).ToList();
 
     var requestBody = new
     {
         model = _options.Model,
         instructions = SystemPrompt,
-        input = message
+        input = messages
     };
 
     request.Content = JsonContent.Create(requestBody);

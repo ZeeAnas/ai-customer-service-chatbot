@@ -30,17 +30,20 @@ export default function Home() {
       content: trimmedMessage,
     };
 
-    setMessages((currentMessages) => [
-      ...currentMessages,
-      userMessage,
-    ]);
+    const updatedMessages = [...messages, userMessage];
 
+    setMessages(updatedMessages);
     setInput("");
     setError("");
     setIsLoading(true);
 
     try {
-      const response = await sendChatMessage(trimmedMessage);
+      const response = await sendChatMessage(
+        updatedMessages.map(({ role, content }) => ({
+          role,
+          content,
+        }))
+      );
 
       const assistantMessage: Message = {
         id: Date.now() + 1,
@@ -92,16 +95,18 @@ export default function Home() {
           {messages.map((message) => (
             <div
               key={message.id}
-              className={`flex ${message.role === "user"
+              className={`flex ${
+                message.role === "user"
                   ? "justify-end"
                   : "justify-start"
-                }`}
+              }`}
             >
               <div
-                className={`max-w-[80%] rounded-2xl px-4 py-3 ${message.role === "user"
+                className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+                  message.role === "user"
                     ? "bg-gray-900 text-white"
                     : "bg-gray-200 text-gray-900"
-                  }`}
+                }`}
               >
                 <p className="whitespace-pre-wrap">
                   {message.content}

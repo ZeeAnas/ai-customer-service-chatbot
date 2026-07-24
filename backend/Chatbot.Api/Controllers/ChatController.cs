@@ -22,24 +22,41 @@ public class ChatController : ControllerBase
     [FromBody] ChatRequest request,
     CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(request.Message))
+        if (request.Messages == null || request.Messages.Count == 0)
         {
             return BadRequest(new
             {
-                error = "Message is required."
+                error = "At least one message is required."
             });
         }
 
-        if (request.Message.Length > 1000)
+        foreach (var message in request.Messages)
         {
-            return BadRequest(new
+            if (string.IsNullOrWhiteSpace(message.Role))
             {
-                error = "Message cannot be longer than 1000 characters."
-            });
+                return BadRequest(new
+                {
+                    error = "Every message must have a role."
+                });
+            }
+            if(string.IsNullOrWhiteSpace(message.Content))
+            {
+                return BadRequest(new{
+                    error = "Every message must have content."
+                });
+            }
+            if(message.Content.Length > 1000 )
+            {
+                return BadRequest(new
+                {
+                    error = "Message content cannot be longer than 1000 characters"
+                });
+            }
+            
         }
 
         var reply = await _chatService.GetReplyAsync(
-            request.Message.Trim(),
+            request.Messages,
             cancellationToken
         );
 

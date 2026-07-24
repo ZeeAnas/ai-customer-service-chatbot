@@ -24,7 +24,7 @@ import type {
   }
   
   export async function sendChatMessage(
-    message: string,
+    messages: ChatRequest["messages"],
     signal?: AbortSignal
   ): Promise<ChatResponse> {
     if (!apiUrl) {
@@ -35,7 +35,7 @@ import type {
     }
   
     const requestBody: ChatRequest = {
-      message,
+      messages,
     };
   
     const response = await fetch(`${apiUrl}/api/chat`, {
