@@ -1,6 +1,6 @@
 using Chatbot.Api.Interfaces;
 using Chatbot.Api.Models.Requests;
-using Chatbot.Api.Models.Responses;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Chatbot.Api.Controllers;
@@ -16,53 +16,105 @@ public class ChatController : ControllerBase
         _chatService = chatService;
     }
 
-    
     [HttpPost]
-    public async Task<ActionResult<ChatResponse>> SendMessage(
-    [FromBody] ChatRequest request,
-    CancellationToken cancellationToken)
+    public async Task SendMessage(
+        [FromBody] ChatRequest request,
+        CancellationToken cancellationToken)
     {
         if (request.Messages == null || request.Messages.Count == 0)
         {
-            return BadRequest(new
-            {
-                error = "At least one message is required."
-            });
+            Response.StatusCode = StatusCodes.Status400BadRequest;
+
+            await Response.WriteAsJsonAsync(
+                new
+                {
+                    error = "At least one message is required."
+                },
+                cancellationToken
+            );
+
+            return;
         }
 
         foreach (var message in request.Messages)
         {
             if (string.IsNullOrWhiteSpace(message.Role))
             {
-                return BadRequest(new
-                {
-                    error = "Every message must have a role."
-                });
+                Response.StatusCode = StatusCodes.Status400BadRequest;
+
+                await Response.WriteAsJsonAsync(
+                    new
+                    {
+                        error = "Every message must have a role."
+                    },
+                    cancellationToken
+                );
+
+                return;
             }
-            if(string.IsNullOrWhiteSpace(message.Content))
+
+            if (string.IsNullOrWhiteSpace(message.Content))
             {
-                return BadRequest(new{
-                    error = "Every message must have content."
-                });
+                Response.StatusCode = StatusCodes.Status400BadRequest;
+
+                await Response.WriteAsJsonAsync(
+                    new
+                    {
+                        error = "Every message must have content."
+                    },
+                    cancellationToken
+                );
+
+                return;
             }
-            if(message.Content.Length > 1000 )
+
+            if (
+    message.Role.Equals(
+        "user",
+        StringComparison.OrdinalIgnoreCase
+    ) &&
+    message.Content.Length > 1000
+)
             {
-                return BadRequest(new
-                {
-                    error = "Message content cannot be longer than 1000 characters"
-                });
+                Response.StatusCode = StatusCodes.Status400BadRequest;
+
+                await Response.WriteAsJsonAsync(
+                    new
+                    {
+                        error =
+                            "User messages cannot be longer than 1000 characters."
+                    },
+                    cancellationToken
+                );
+
+                return;
             }
-            
         }
 
-        var reply = await _chatService.GetReplyAsync(
-            request.Messages,
-            cancellationToken
-        );
+        Response.StatusCode = StatusCodes.Status200OK;
+        Response.ContentType = "text/plain; charset=utf-8";
+        Response.Headers.CacheControl = "no-cache";
+        Response.Headers.Append("X-Accel-Buffering", "no");
 
-        return Ok(new ChatResponse
+        HttpContext.Features
+            .Get<IHttpResponseBodyFeature>()
+            ?.DisableBuffering();
+
+        await foreach (
+            var chunk in _chatService.StreamReplyAsync(
+                request.Messages,
+                cancellationToken
+            )
+        )
         {
-            Reply = reply
-        });
+            await Response.WriteAsync(
+                chunk,
+                cancellationToken
+            );
+
+            await Response.Body.FlushAsync(
+                cancellationToken
+            );
+        }
     }
 }

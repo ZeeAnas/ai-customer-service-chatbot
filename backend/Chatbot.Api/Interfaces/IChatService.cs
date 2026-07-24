@@ -4,7 +4,7 @@ namespace Chatbot.Api.Interfaces;
 
 public interface IChatService
 {
-    Task<string> GetReplyAsync(
+    IAsyncEnumerable<string> StreamReplyAsync(
         List<ChatMessageRequest> messages,
         CancellationToken cancellationToken
     );
