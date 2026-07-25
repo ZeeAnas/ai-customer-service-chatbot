@@ -30,7 +30,11 @@ builder.Services.AddCors(options =>
     });
 });
 
+
+
 // Services
+builder.Services.AddSingleton<IPromptService, PromptService>();
+
 builder.Services
     .AddHttpClient<IChatService, ChatService>(client =>
     {
@@ -42,6 +46,8 @@ builder.Services
 builder.Services.AddOpenApi();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+
+
 
 var app = builder.Build();
 app.UseMiddleware<GlobalExceptionMiddleware>();

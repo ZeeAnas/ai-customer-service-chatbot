@@ -12,68 +12,41 @@ namespace Chatbot.Api.Services;
 
 public class ChatService : IChatService
 {
-    private readonly string _systemPrompt;
-
     private readonly HttpClient _httpClient;
     private readonly OpenAiOptions _options;
     private readonly ILogger<ChatService> _logger;
+    private readonly IPromptService _promptService;
 
-   public ChatService(
-    HttpClient httpClient,
-    IOptions<OpenAiOptions> options,
-    ILogger<ChatService> logger,
-    IWebHostEnvironment environment)
-{
-    _httpClient = httpClient;
-    _options = options.Value;
-    _logger = logger;
-
-    var promptPath = Path.Combine(
-        environment.ContentRootPath,
-        "Prompts",
-        "MontanaBarberSystemPrompt.txt"
-    );
-
-    if (!File.Exists(promptPath))
+    public ChatService(
+        HttpClient httpClient,
+        IOptions<OpenAiOptions> options,
+        ILogger<ChatService> logger,
+        IPromptService promptService)
     {
-        throw new FileNotFoundException(
-            "The Montana Barber system prompt file was not found.",
-            promptPath
-        );
+        _httpClient = httpClient;
+        _options = options.Value;
+        _logger = logger;
+        _promptService = promptService;
     }
-
-    _systemPrompt = File.ReadAllText(promptPath);
-
-    if (string.IsNullOrWhiteSpace(_systemPrompt))
-    {
-        throw new InvalidOperationException(
-            "The Montana Barber system prompt file is empty."
-        );
-    }
-}
 
     public async IAsyncEnumerable<string> StreamReplyAsync(
         List<ChatMessageRequest> messages,
-        [EnumeratorCancellation]
-        CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         ValidateConfiguration();
 
         _logger.LogInformation(
             "Sending streaming request to OpenAI using model {Model}",
-            _options.Model
-        );
+            _options.Model);
 
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
-            $"{_options.BaseUrl}responses"
-        );
+            $"{_options.BaseUrl}responses");
 
         request.Headers.Authorization =
             new AuthenticationHeaderValue(
                 "Bearer",
-                _options.ApiKey
-            );
+                _options.ApiKey);
 
         var openAiMessages = messages.Select(message => new
         {
@@ -93,7 +66,7 @@ public class ChatService : IChatService
         var requestBody = new
         {
             model = _options.Model,
-            instructions = _systemPrompt,
+            instructions = _promptService.GetSystemPrompt(),
             input = openAiMessages,
             stream = true
         };
@@ -103,8 +76,7 @@ public class ChatService : IChatService
         using var response = await _httpClient.SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken
-        );
+            cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -114,13 +86,11 @@ public class ChatService : IChatService
             _logger.LogError(
                 "OpenAI request failed with status code {StatusCode}. Response: {ResponseBody}",
                 (int)response.StatusCode,
-                errorBody
-            );
+                errorBody);
 
             throw new OpenAiServiceException(
                 "The OpenAI service returned an unsuccessful response.",
-                (int)response.StatusCode
-            );
+                (int)response.StatusCode);
         }
 
         await using var stream =
@@ -146,7 +116,9 @@ public class ChatService : IChatService
 
             if (json == "[DONE]")
             {
-                _logger.LogInformation("OpenAI streaming request completed successfully");
+                _logger.LogInformation(
+                    "OpenAI streaming request completed successfully");
+
                 yield break;
             }
 
@@ -163,7 +135,9 @@ public class ChatService : IChatService
 
             if (eventType == "response.completed")
             {
-                _logger.LogInformation("OpenAI streaming request completed successfully");
+                _logger.LogInformation(
+                    "OpenAI streaming request completed successfully");
+
                 yield break;
             }
 
@@ -187,12 +161,9 @@ public class ChatService : IChatService
 
                 throw new OpenAiServiceException(
                     errorMessage ?? "An unknown streaming error occurred.",
-                    502
-                );
+                    502);
             }
         }
-
-
     }
 
     private void ValidateConfiguration()
@@ -200,22 +171,19 @@ public class ChatService : IChatService
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
         {
             throw new InvalidOperationException(
-                "The OpenAI API key is not configured."
-            );
+                "The OpenAI API key is not configured.");
         }
 
         if (string.IsNullOrWhiteSpace(_options.BaseUrl))
         {
             throw new InvalidOperationException(
-                "The OpenAI base URL is not configured."
-            );
+                "The OpenAI base URL is not configured.");
         }
 
         if (string.IsNullOrWhiteSpace(_options.Model))
         {
             throw new InvalidOperationException(
-                "The OpenAI model is not configured."
-            );
+                "The OpenAI model is not configured.");
         }
     }
 }
