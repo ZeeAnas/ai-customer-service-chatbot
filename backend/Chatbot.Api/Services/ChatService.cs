@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using Chatbot.Api.Configuration;
 using Chatbot.Api.Exceptions;
@@ -16,17 +17,23 @@ public class ChatService : IChatService
     private readonly OpenAiOptions _options;
     private readonly ILogger<ChatService> _logger;
     private readonly IPromptService _promptService;
+    private readonly IBusinessHoursService _businessHoursService;
+    private readonly IFallbackService _fallbackService;
 
     public ChatService(
         HttpClient httpClient,
         IOptions<OpenAiOptions> options,
         ILogger<ChatService> logger,
-        IPromptService promptService)
+        IPromptService promptService,
+        IBusinessHoursService businessHoursService,
+        IFallbackService fallbackService)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _logger = logger;
         _promptService = promptService;
+        _businessHoursService = businessHoursService;
+        _fallbackService = fallbackService;
     }
 
     public async IAsyncEnumerable<string> StreamReplyAsync(
@@ -63,10 +70,44 @@ public class ChatService : IChatService
             }
         }).ToList();
 
+        var businessHoursStatus =
+            _businessHoursService.GetStatusMessage();
+
+        var weeklyBusinessHours =
+            _businessHoursService.GetWeeklyScheduleMessage();
+
+        var systemInstructions =
+            $"""
+            {_promptService.GetSystemPrompt()}
+
+            Current business-hours status:
+            {businessHoursStatus}
+
+            Weekly opening hours:
+            {weeklyBusinessHours}
+
+            Business-hours rules:
+
+            1. Use the current business-hours status when answering whether
+               the business is open or closed right now.
+
+            2. Use the weekly opening hours when answering questions about
+               opening times, closing times, specific days, or future visits.
+
+            3. When the user asks for the opening hours generally, provide
+               the weekly schedule.
+
+            4. Never guess, invent, or contradict the business-hours
+               information provided above.
+
+            5. Do not say that the opening hours are unavailable because
+               they are provided above.
+            """;
+
         var requestBody = new
         {
             model = _options.Model,
-            instructions = _promptService.GetSystemPrompt(),
+            instructions = systemInstructions,
             input = openAiMessages,
             stream = true
         };
@@ -98,9 +139,16 @@ public class ChatService : IChatService
 
         using var reader = new StreamReader(stream);
 
+        var completeResponse = new StringBuilder();
+
         while (true)
         {
             var line = await reader.ReadLineAsync(cancellationToken);
+
+            if (line is null)
+            {
+                break;
+            }
 
             if (string.IsNullOrWhiteSpace(line))
             {
@@ -116,10 +164,7 @@ public class ChatService : IChatService
 
             if (json == "[DONE]")
             {
-                _logger.LogInformation(
-                    "OpenAI streaming request completed successfully");
-
-                yield break;
+                break;
             }
 
             using var document = JsonDocument.Parse(json);
@@ -135,10 +180,7 @@ public class ChatService : IChatService
 
             if (eventType == "response.completed")
             {
-                _logger.LogInformation(
-                    "OpenAI streaming request completed successfully");
-
-                yield break;
+                break;
             }
 
             if (eventType == "response.output_text.delta" &&
@@ -148,7 +190,7 @@ public class ChatService : IChatService
 
                 if (!string.IsNullOrEmpty(delta))
                 {
-                    yield return delta;
+                    completeResponse.Append(delta);
                 }
             }
 
@@ -164,6 +206,23 @@ public class ChatService : IChatService
                     502);
             }
         }
+
+        var finalResponse = completeResponse.ToString();
+
+        if (_fallbackService.ShouldFallback(finalResponse))
+        {
+            _logger.LogInformation(
+                "AI response triggered fallback detection");
+
+            yield return _fallbackService.GetFallbackResponse();
+        }
+        else
+        {
+            yield return finalResponse;
+        }
+
+        _logger.LogInformation(
+            "OpenAI streaming request completed successfully");
     }
 
     private void ValidateConfiguration()

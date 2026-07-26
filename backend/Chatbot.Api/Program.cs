@@ -1,7 +1,7 @@
 using Chatbot.Api.Configuration;
 using Chatbot.Api.Interfaces;
-using Chatbot.Api.Services;
 using Chatbot.Api.Middleware;
+using Chatbot.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,26 +30,47 @@ builder.Services.AddCors(options =>
     });
 });
 
-
-
 // Services
+
+builder.Services.Configure<BusinessHoursOptions>(
+    builder.Configuration.GetSection(
+        BusinessHoursOptions.SectionName
+    )
+);
+builder.Services.AddSingleton<
+
+    IBusinessHoursService,
+
+    BusinessHoursService
+
+>();
+
+builder.Services.AddSingleton<
+    IFallbackService,
+    FallbackService
+>();
+
 builder.Services.AddSingleton<IPromptService, PromptService>();
+
+builder.Services.AddScoped<IHandoffService, HandoffService>();
 
 builder.Services
     .AddHttpClient<IChatService, ChatService>(client =>
     {
-        // This prevents a request from waiting indefinitely when OpenAI or the network does not respond.
+        // Prevents requests from waiting indefinitely if OpenAI
+        // or the network does not respond.
         client.Timeout = TimeSpan.FromSeconds(30);
     });
+
 
 // OpenAPI / Swagger
 builder.Services.AddOpenApi();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-
-
 var app = builder.Build();
+
+// Global exception handling
 app.UseMiddleware<GlobalExceptionMiddleware>();
 
 if (app.Environment.IsDevelopment())
@@ -59,7 +80,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-// Keep disabled for now if HTTPS is not configured locally.
+// Keep disabled while HTTPS is not configured locally.
 // app.UseHttpsRedirection();
 
 app.UseCors("Frontend");
