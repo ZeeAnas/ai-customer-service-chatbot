@@ -1,5 +1,6 @@
 using Chatbot.Api.Interfaces;
 using Chatbot.Api.Models.Requests;
+using Chatbot.Api.Services;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 
@@ -10,10 +11,12 @@ namespace Chatbot.Api.Controllers;
 public class ChatController : ControllerBase
 {
     private readonly IChatService _chatService;
+    private readonly IConversationService _conversationService;
 
-    public ChatController(IChatService chatService)
+    public ChatController(IChatService chatService, IConversationService conversationService)
     {
         _chatService = chatService;
+        _conversationService = conversationService;
     }
 
     [HttpPost]
@@ -102,6 +105,7 @@ public class ChatController : ControllerBase
 
         await foreach (
             var chunk in _chatService.StreamReplyAsync(
+                request.SessionId,
                 request.Messages,
                 cancellationToken
             )
@@ -116,5 +120,34 @@ public class ChatController : ControllerBase
                 cancellationToken
             );
         }
+    }
+
+    [HttpGet("history/{sessionId}")]
+    public async Task<IActionResult> GetHistory(
+    string sessionId,
+    CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return BadRequest(new
+            {
+                error = "Session ID cannot be empty."
+            });
+        }
+
+        var messages =
+            await _conversationService.GetMessagesBySessionIdAsync(
+                sessionId,
+                cancellationToken);
+
+        var response = messages.Select(message => new
+        {
+            id = message.Id,
+            role = message.Role,
+            content = message.Content,
+            createdAt = message.CreatedAt
+        });
+
+        return Ok(response);
     }
 }

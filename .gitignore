@@ -95,3 +95,6 @@ pnpm-debug.log*
 *.swp
 *.swo
 *~
+
+# Local SQLite database
+backend/Chatbot.Api/chatbot.db*

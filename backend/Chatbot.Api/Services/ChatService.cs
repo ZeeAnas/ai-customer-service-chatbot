@@ -19,6 +19,7 @@ public class ChatService : IChatService
     private readonly IPromptService _promptService;
     private readonly IBusinessHoursService _businessHoursService;
     private readonly IFallbackService _fallbackService;
+    private readonly IConversationService _conversationService;
 
     public ChatService(
         HttpClient httpClient,
@@ -26,7 +27,8 @@ public class ChatService : IChatService
         ILogger<ChatService> logger,
         IPromptService promptService,
         IBusinessHoursService businessHoursService,
-        IFallbackService fallbackService)
+        IFallbackService fallbackService,
+        IConversationService conversationService)
     {
         _httpClient = httpClient;
         _options = options.Value;
@@ -34,12 +36,42 @@ public class ChatService : IChatService
         _promptService = promptService;
         _businessHoursService = businessHoursService;
         _fallbackService = fallbackService;
+        _conversationService = conversationService;
     }
 
     public async IAsyncEnumerable<string> StreamReplyAsync(
+        string sessionId,
         List<ChatMessageRequest> messages,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException(
+                "Session ID cannot be empty.",
+                nameof(sessionId));
+        }
+
+        var conversation =
+            await _conversationService.GetOrCreateConversationAsync(
+                sessionId,
+                cancellationToken);
+
+        var latestUserMessage = messages
+            .LastOrDefault(message =>
+                string.Equals(
+                    message.Role,
+                    "user",
+                    StringComparison.OrdinalIgnoreCase));
+
+        if (latestUserMessage is not null &&
+            !string.IsNullOrWhiteSpace(latestUserMessage.Content))
+        {
+            await _conversationService.AddMessageAsync(
+                conversation.Id,
+                "user",
+                latestUserMessage.Content,
+                cancellationToken);
+        }
         ValidateConfiguration();
 
         _logger.LogInformation(
@@ -209,16 +241,30 @@ public class ChatService : IChatService
 
         var finalResponse = completeResponse.ToString();
 
+        string responseToReturn;
+
         if (_fallbackService.ShouldFallback(finalResponse))
         {
             _logger.LogInformation(
                 "AI response triggered fallback detection");
 
-            yield return _fallbackService.GetFallbackResponse();
+            responseToReturn =
+                _fallbackService.GetFallbackResponse();
         }
         else
         {
-            yield return finalResponse;
+            responseToReturn = finalResponse;
+        }
+
+        if (!string.IsNullOrWhiteSpace(responseToReturn))
+        {
+            await _conversationService.AddMessageAsync(
+                conversation.Id,
+                "assistant",
+                responseToReturn,
+                cancellationToken);
+
+            yield return responseToReturn;
         }
 
         _logger.LogInformation(

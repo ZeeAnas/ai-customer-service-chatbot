@@ -5,6 +5,38 @@ import type {
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL;
 
+export type ChatHistoryMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+};
+
+export type CreateLeadRequest = {
+  sessionId: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  message: string;
+  consentToContact: boolean;
+};
+
+export type LeadResponse = {
+  id: number;
+  conversationId: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  message: string;
+  status: number;
+  createdAtUtc: string;
+};
+
+type ApiValidationError = ApiError & {
+  title?: string;
+  errors?: Record<string, string[]>;
+};
+
 export class ChatApiError extends Error {
   status: number;
   traceId?: string;
@@ -22,11 +54,7 @@ export class ChatApiError extends Error {
   }
 }
 
-export async function sendChatMessage(
-  messages: ChatRequest["messages"],
-  onChunk: (chunk: string) => void,
-  signal?: AbortSignal
-): Promise<void> {
+function ensureApiUrl(): string {
   if (!apiUrl) {
     throw new ChatApiError(
       "The backend URL is not configured.",
@@ -34,32 +62,95 @@ export async function sendChatMessage(
     );
   }
 
+  return apiUrl;
+}
+
+async function getApiError(
+  response: Response,
+  fallbackMessage: string
+): Promise<ChatApiError> {
+  let apiError: ApiValidationError = {};
+
+  try {
+    apiError =
+      (await response.json()) as ApiValidationError;
+  } catch {
+    // Use the fallback message when the response
+    // does not contain valid JSON.
+  }
+
+  const validationMessage = apiError.errors
+    ? Object.values(apiError.errors).flat()[0]
+    : undefined;
+
+  return new ChatApiError(
+    validationMessage ??
+      apiError.error ??
+      apiError.title ??
+      fallbackMessage,
+    response.status,
+    apiError.traceId
+  );
+}
+
+export async function getChatHistory(
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<ChatHistoryMessage[]> {
+  const baseUrl = ensureApiUrl();
+
+  const response = await fetch(
+    `${baseUrl}/api/chat/history/${encodeURIComponent(
+      sessionId
+    )}`,
+    {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw await getApiError(
+      response,
+      "The conversation history could not be loaded."
+    );
+  }
+
+  return (await response.json()) as ChatHistoryMessage[];
+}
+
+export async function sendChatMessage(
+  sessionId: string,
+  messages: ChatRequest["messages"],
+  onChunk: (chunk: string) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const baseUrl = ensureApiUrl();
+
   const requestBody: ChatRequest = {
+    sessionId,
     messages,
   };
 
-  const response = await fetch(`${apiUrl}/api/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-    signal,
-  });
+  const response = await fetch(
+    `${baseUrl}/api/chat`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+      signal,
+    }
+  );
 
   if (!response.ok) {
-    let apiError: ApiError = {};
-
-    try {
-      apiError = await response.json();
-    } catch {
-      
-    }
-
-    throw new ChatApiError(
-      apiError.error ?? "The chat request failed.",
-      response.status,
-      apiError.traceId
+    throw await getApiError(
+      response,
+      "The chat request failed."
     );
   }
 
@@ -98,4 +189,33 @@ export async function sendChatMessage(
   } finally {
     reader.releaseLock();
   }
+}
+
+export async function submitLead(
+  request: CreateLeadRequest,
+  signal?: AbortSignal
+): Promise<LeadResponse> {
+  const baseUrl = ensureApiUrl();
+
+  const response = await fetch(
+    `${baseUrl}/api/leads`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(request),
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw await getApiError(
+      response,
+      "The contact request could not be submitted."
+    );
+  }
+
+  return (await response.json()) as LeadResponse;
 }

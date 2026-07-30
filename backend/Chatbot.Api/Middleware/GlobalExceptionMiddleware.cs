@@ -36,51 +36,79 @@ public class GlobalExceptionMiddleware
         }
     }
 
-    private async Task HandleExceptionAsync(
-        HttpContext context,
-        Exception exception)
+   private async Task HandleExceptionAsync(
+    HttpContext context,
+    Exception exception)
+{
+    var statusCode = exception switch
     {
-        var statusCode = exception switch
-        {
-            OpenAiServiceException => StatusCodes.Status503ServiceUnavailable,
+        ResourceNotFoundException =>
+            StatusCodes.Status404NotFound,
 
-            HttpRequestException => StatusCodes.Status503ServiceUnavailable,
+        ConflictException =>
+            StatusCodes.Status409Conflict,
 
-            TaskCanceledException => StatusCodes.Status504GatewayTimeout,
+        OpenAiServiceException =>
+            StatusCodes.Status503ServiceUnavailable,
 
-            InvalidOperationException =>
-                StatusCodes.Status500InternalServerError,
+        HttpRequestException =>
+            StatusCodes.Status503ServiceUnavailable,
 
-            _ => StatusCodes.Status500InternalServerError
-        };
+        TaskCanceledException =>
+            StatusCodes.Status504GatewayTimeout,
 
-        var clientMessage = statusCode switch
-        {
-            StatusCodes.Status503ServiceUnavailable =>
-                "The AI service is temporarily unavailable.",
+        _ => StatusCodes.Status500InternalServerError
+    };
 
-            StatusCodes.Status504GatewayTimeout =>
-                "The AI service took too long to respond.",
+    var clientMessage = exception switch
+    {
+        ResourceNotFoundException =>
+            exception.Message,
 
-            _ => "An unexpected server error occurred."
-        };
+        ConflictException =>
+            exception.Message,
 
+        OpenAiServiceException =>
+            "The AI service is temporarily unavailable.",
+
+        HttpRequestException =>
+            "The AI service is temporarily unavailable.",
+
+        TaskCanceledException =>
+            "The AI service took too long to respond.",
+
+        _ =>
+            "An unexpected server error occurred."
+    };
+
+    if (statusCode >= StatusCodes.Status500InternalServerError)
+    {
         _logger.LogError(
             exception,
             "Request {TraceId} failed with status code {StatusCode}",
             context.TraceIdentifier,
             statusCode
         );
-
-        context.Response.StatusCode = statusCode;
-        context.Response.ContentType = "application/json";
-
-        var errorResponse = new ErrorResponse
-        {
-            Error = clientMessage,
-            TraceId = context.TraceIdentifier
-        };
-
-        await context.Response.WriteAsJsonAsync(errorResponse);
     }
+    else
+    {
+        _logger.LogWarning(
+            exception,
+            "Request {TraceId} failed with status code {StatusCode}",
+            context.TraceIdentifier,
+            statusCode
+        );
+    }
+
+    context.Response.StatusCode = statusCode;
+    context.Response.ContentType = "application/json";
+
+    var errorResponse = new ErrorResponse
+    {
+        Error = clientMessage,
+        TraceId = context.TraceIdentifier
+    };
+
+    await context.Response.WriteAsJsonAsync(errorResponse);
+}
 }

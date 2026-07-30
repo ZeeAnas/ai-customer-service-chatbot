@@ -1,3 +1,4 @@
+
 "use client";
 
 import {
@@ -10,12 +11,14 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ChatApiError,
+  getChatHistory,
   sendChatMessage,
+  submitLead,
 } from "@/services/chatService";
 import { X } from "lucide-react";
 
 type Message = {
-  id: number;
+  id: string;
   role: "user" | "assistant";
   content: string;
 };
@@ -29,15 +32,45 @@ const suggestedQuestions = [
 
 const CHAT_MESSAGES_KEY = "chatMessages";
 const LAST_ACTIVITY_KEY = "chatLastActivity";
+const CHAT_SESSION_ID_KEY = "chatSessionId";
+
 const CHAT_EXPIRATION_MINUTES = 30;
 
 const FALLBACK_RESPONSE_PREFIX =
   "I couldn't find a reliable answer to your question.";
 
+function getOrCreateSessionId(): string {
+  const existingSessionId = sessionStorage.getItem(
+    CHAT_SESSION_ID_KEY
+  );
+
+  if (existingSessionId) {
+    return existingSessionId;
+  }
+
+  const newSessionId = crypto.randomUUID();
+
+  sessionStorage.setItem(
+    CHAT_SESSION_ID_KEY,
+    newSessionId
+  );
+
+  return newSessionId;
+}
+
+function clearStoredConversation() {
+  sessionStorage.removeItem(CHAT_MESSAGES_KEY);
+  sessionStorage.removeItem(LAST_ACTIVITY_KEY);
+  sessionStorage.removeItem(CHAT_SESSION_ID_KEY);
+}
+
 export default function Home() {
   const [input, setInput] = useState("");
 
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(
+    []
+  );
+
   const [hasLoadedMessages, setHasLoadedMessages] =
     useState(false);
 
@@ -45,14 +78,30 @@ export default function Home() {
     useState(false);
 
   const [handoffName, setHandoffName] = useState("");
-  const [handoffEmail, setHandoffEmail] = useState("");
-  const [handoffPhone, setHandoffPhone] = useState("");
+
+  const [handoffEmail, setHandoffEmail] =
+    useState("");
+
+  const [handoffPhone, setHandoffPhone] =
+    useState("");
+
   const [handoffMessage, setHandoffMessage] =
     useState("");
+
+  const [handoffConsent, setHandoffConsent] =
+    useState(false);
+
   const [handoffSuccess, setHandoffSuccess] =
     useState("");
 
+  const [handoffError, setHandoffError] =
+    useState("");
+
+  const [isSubmittingHandoff, setIsSubmittingHandoff] =
+    useState(false);
+
   const [isLoading, setIsLoading] = useState(false);
+
   const [error, setError] = useState("");
 
   const abortControllerRef =
@@ -65,42 +114,94 @@ export default function Home() {
     useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const savedMessages =
-      sessionStorage.getItem(CHAT_MESSAGES_KEY);
+    const abortController = new AbortController();
 
-    const savedLastActivity =
-      sessionStorage.getItem(LAST_ACTIVITY_KEY);
+    async function loadConversationHistory() {
+      const savedMessages = sessionStorage.getItem(
+        CHAT_MESSAGES_KEY
+      );
 
-    const expirationMilliseconds =
-      CHAT_EXPIRATION_MINUTES * 60 * 1000;
+      const savedLastActivity = sessionStorage.getItem(
+        LAST_ACTIVITY_KEY
+      );
 
-    const lastActivity = savedLastActivity
-      ? Number(savedLastActivity)
-      : 0;
+      const expirationMilliseconds =
+        CHAT_EXPIRATION_MINUTES * 60 * 1000;
 
-    const conversationHasExpired =
-      Date.now() - lastActivity > expirationMilliseconds;
+      const lastActivity = savedLastActivity
+        ? Number(savedLastActivity)
+        : 0;
 
-    if (conversationHasExpired) {
-      sessionStorage.removeItem(CHAT_MESSAGES_KEY);
-      sessionStorage.removeItem(LAST_ACTIVITY_KEY);
-      setHasLoadedMessages(true);
-      return;
-    }
+      const conversationHasExpired =
+        lastActivity > 0 &&
+        Date.now() - lastActivity >
+          expirationMilliseconds;
 
-    if (savedMessages) {
+      if (conversationHasExpired) {
+        clearStoredConversation();
+      }
+
+      const sessionId = getOrCreateSessionId();
+
       try {
-        const parsedMessages =
-          JSON.parse(savedMessages) as Message[];
+        const history = await getChatHistory(
+          sessionId,
+          abortController.signal
+        );
 
-        setMessages(parsedMessages);
-      } catch {
-        sessionStorage.removeItem(CHAT_MESSAGES_KEY);
-        sessionStorage.removeItem(LAST_ACTIVITY_KEY);
+        const restoredMessages: Message[] =
+          history.map((message) => ({
+            id: message.id,
+            role: message.role,
+            content: message.content,
+          }));
+
+        setMessages(restoredMessages);
+        setError("");
+      } catch (requestError) {
+        if (
+          requestError instanceof DOMException &&
+          requestError.name === "AbortError"
+        ) {
+          return;
+        }
+
+        console.error(
+          "Could not load conversation history:",
+          requestError
+        );
+
+        if (!conversationHasExpired && savedMessages) {
+          try {
+            const parsedMessages = JSON.parse(
+              savedMessages
+            ) as Message[];
+
+            setMessages(parsedMessages);
+          } catch {
+            sessionStorage.removeItem(
+              CHAT_MESSAGES_KEY
+            );
+
+            sessionStorage.removeItem(
+              LAST_ACTIVITY_KEY
+            );
+          }
+        }
+
+        setError(
+          "The saved conversation could not be loaded from the server."
+        );
+      } finally {
+        setHasLoadedMessages(true);
       }
     }
 
-    setHasLoadedMessages(true);
+    void loadConversationHistory();
+
+    return () => {
+      abortController.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -124,10 +225,14 @@ export default function Home() {
   }, [messages, hasLoadedMessages]);
 
   useEffect(() => {
+    if (!hasLoadedMessages) {
+      return;
+    }
+
     messagesEndRef.current?.scrollIntoView({
       behavior: "smooth",
     });
-  }, [messages]);
+  }, [messages, hasLoadedMessages]);
 
   useEffect(() => {
     const latestAssistantMessage = [...messages]
@@ -139,20 +244,26 @@ export default function Home() {
     const isFallbackResponse =
       latestAssistantMessage?.content
         .trim()
-        .startsWith(FALLBACK_RESPONSE_PREFIX) ?? false;
+        .startsWith(FALLBACK_RESPONSE_PREFIX) ??
+      false;
 
     if (!isFallbackResponse) {
       return;
     }
 
+    setHandoffError("");
     setShowHandoffForm(true);
 
-    window.setTimeout(() => {
+    const timeoutId = window.setTimeout(() => {
       handoffFormRef.current?.scrollIntoView({
         behavior: "smooth",
         block: "center",
       });
     }, 100);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [messages]);
 
   function handleStopGenerating() {
@@ -160,7 +271,9 @@ export default function Home() {
 
     setMessages((currentMessages) => {
       const lastMessage =
-        currentMessages[currentMessages.length - 1];
+        currentMessages[
+          currentMessages.length - 1
+        ];
 
       if (
         lastMessage?.role === "assistant" &&
@@ -180,17 +293,21 @@ export default function Home() {
 
     const trimmedMessage = input.trim();
 
-    if (!trimmedMessage || isLoading) {
+    if (
+      !trimmedMessage ||
+      isLoading ||
+      !hasLoadedMessages
+    ) {
       return;
     }
 
     const userMessage: Message = {
-      id: Date.now(),
+      id: crypto.randomUUID(),
       role: "user",
       content: trimmedMessage,
     };
 
-    const assistantMessageId = Date.now() + 1;
+    const assistantMessageId = crypto.randomUUID();
 
     const assistantMessage: Message = {
       id: assistantMessageId,
@@ -218,7 +335,10 @@ export default function Home() {
     abortControllerRef.current = abortController;
 
     try {
+      const sessionId = getOrCreateSessionId();
+
       await sendChatMessage(
+        sessionId,
         updatedMessages
           .filter((message) =>
             message.content.trim()
@@ -227,7 +347,6 @@ export default function Home() {
             role,
             content,
           })),
-
         (chunk) => {
           setMessages((currentMessages) =>
             currentMessages.map((message) =>
@@ -241,18 +360,17 @@ export default function Home() {
             )
           );
         },
-
         abortController.signal
       );
     } catch (requestError) {
-      console.error(requestError);
-
       if (
         requestError instanceof DOMException &&
         requestError.name === "AbortError"
       ) {
         return;
       }
+
+      console.error(requestError);
 
       setMessages((currentMessages) =>
         currentMessages.filter(
@@ -280,39 +398,55 @@ export default function Home() {
     const trimmedPhone = handoffPhone.trim();
     const trimmedMessage = handoffMessage.trim();
 
-    if (
-      !trimmedName ||
-      !trimmedEmail ||
-      !trimmedMessage
-    ) {
-      alert(
-        "Please enter your name, email and message."
-      );
+    setHandoffError("");
+    setHandoffSuccess("");
+
+    if (!trimmedName) {
+      setHandoffError("Please enter your name.");
       return;
     }
 
-    try {
-      const response = await fetch(
-        "http://localhost:5130/api/handoff",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            name: trimmedName,
-            email: trimmedEmail,
-            phone: trimmedPhone || null,
-            message: trimmedMessage,
-          }),
-        }
+    if (!trimmedEmail && !trimmedPhone) {
+      setHandoffError(
+        "Please enter either an email address or a phone number."
       );
 
-      if (!response.ok) {
-        throw new Error(
-          "The handoff request could not be submitted."
-        );
-      }
+      return;
+    }
+
+    if (!trimmedMessage) {
+      setHandoffError(
+        "Please describe how Montana Barber can help you."
+      );
+
+      return;
+    }
+
+    if (!handoffConsent) {
+      setHandoffError(
+        "You must agree to be contacted before submitting."
+      );
+
+      return;
+    }
+
+    if (isSubmittingHandoff) {
+      return;
+    }
+
+    setIsSubmittingHandoff(true);
+
+    try {
+      const sessionId = getOrCreateSessionId();
+
+      await submitLead({
+        sessionId,
+        name: trimmedName,
+        email: trimmedEmail || null,
+        phone: trimmedPhone || null,
+        message: trimmedMessage,
+        consentToContact: handoffConsent,
+      });
 
       setHandoffSuccess(
         "Your request has been submitted. Montana Barber will contact you soon."
@@ -322,13 +456,32 @@ export default function Home() {
       setHandoffEmail("");
       setHandoffPhone("");
       setHandoffMessage("");
+      setHandoffConsent(false);
       setShowHandoffForm(false);
     } catch (requestError) {
-      console.error(requestError);
+      console.error(
+        "Could not submit lead:",
+        requestError
+      );
 
-      alert(
+      if (requestError instanceof ChatApiError) {
+        if (requestError.status === 404) {
+          setHandoffError(
+            "Please send a chat message before requesting human assistance."
+          );
+
+          return;
+        }
+
+        setHandoffError(requestError.message);
+        return;
+      }
+
+      setHandoffError(
         "Something went wrong while sending your request. Please try again."
       );
+    } finally {
+      setIsSubmittingHandoff(false);
     }
   }
 
@@ -346,30 +499,46 @@ export default function Home() {
         </header>
 
         <section className="flex-1 space-y-4 overflow-y-auto p-6">
-          {messages.length === 0 && (
-            <div className="flex h-full flex-col items-center justify-center">
-              <p className="mb-4 text-center text-gray-600">
-                How can we help you?
-              </p>
+          {!hasLoadedMessages && (
+            <div className="flex h-full items-center justify-center">
+              <div
+                className="flex items-center gap-1"
+                aria-label="Loading conversation"
+              >
+                <span className="h-2 w-2 animate-bounce rounded-full bg-gray-500 [animation-delay:-0.3s]" />
 
-              <div className="grid w-full max-w-md gap-2 sm:grid-cols-2">
-                {suggestedQuestions.map(
-                  (question) => (
-                    <button
-                      key={question}
-                      type="button"
-                      onClick={() =>
-                        setInput(question)
-                      }
-                      className="rounded-xl border border-gray-300 bg-white px-4 py-3 text-left text-sm text-gray-800 transition hover:border-gray-500 hover:bg-gray-50"
-                    >
-                      {question}
-                    </button>
-                  )
-                )}
+                <span className="h-2 w-2 animate-bounce rounded-full bg-gray-500 [animation-delay:-0.15s]" />
+
+                <span className="h-2 w-2 animate-bounce rounded-full bg-gray-500" />
               </div>
             </div>
           )}
+
+          {hasLoadedMessages &&
+            messages.length === 0 && (
+              <div className="flex h-full flex-col items-center justify-center">
+                <p className="mb-4 text-center text-gray-600">
+                  How can we help you?
+                </p>
+
+                <div className="grid w-full max-w-md gap-2 sm:grid-cols-2">
+                  {suggestedQuestions.map(
+                    (question) => (
+                      <button
+                        key={question}
+                        type="button"
+                        onClick={() =>
+                          setInput(question)
+                        }
+                        className="rounded-xl border border-gray-300 bg-white px-4 py-3 text-left text-sm text-gray-800 transition hover:border-gray-500 hover:bg-gray-50"
+                      >
+                        {question}
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+            )}
 
           {messages.map((message) => (
             <div
@@ -479,112 +648,166 @@ export default function Home() {
           ))}
 
           {handoffSuccess && (
-            <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+            <div
+              role="status"
+              aria-live="polite"
+              className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800"
+            >
               {handoffSuccess}
             </div>
           )}
 
-          <div className="mx-auto w-full max-w-md">
-            <button
-              type="button"
-              onClick={() =>
-                setShowHandoffForm(true)
-              }
-              className="w-full rounded-xl border border-gray-900 bg-gray-900 px-4 py-3 text-sm font-medium text-white transition hover:bg-gray-700"
-            >
-              Talk to a person
-            </button>
-
-            {showHandoffForm && (
-              <div
-                ref={handoffFormRef}
-                className="relative mt-3 rounded-2xl border border-gray-300 bg-gray-50 p-5 shadow-sm"
+          {hasLoadedMessages && (
+            <div className="mx-auto w-full max-w-md">
+              <button
+                type="button"
+                onClick={() => {
+                  setHandoffError("");
+                  setHandoffSuccess("");
+                  setShowHandoffForm(true);
+                }}
+                className="w-full rounded-xl border border-gray-900 bg-gray-900 px-4 py-3 text-sm font-medium text-white transition hover:bg-gray-700"
               >
-                <div className="mb-4 pr-10">
-                  <h2 className="font-semibold text-gray-900">
-                    Contact Montana Barber
-                  </h2>
+                Talk to a person
+              </button>
 
-                  <p className="mt-1 text-sm text-gray-600">
-                    Leave your details and we will get
-                    back to you.
-                  </p>
+              {showHandoffForm && (
+                <div
+                  ref={handoffFormRef}
+                  className="relative mt-3 rounded-2xl border border-gray-300 bg-gray-50 p-5 shadow-sm"
+                >
+                  <div className="mb-4 pr-10">
+                    <h2 className="font-semibold text-gray-900">
+                      Contact Montana Barber
+                    </h2>
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setShowHandoffForm(false)
-                    }
-                    aria-label="Close contact form"
-                    className="absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-full text-red-500 transition hover:bg-red-100 hover:text-red-700"
-                  >
-                    <X
-                      size={21}
-                      strokeWidth={2.5}
+                    <p className="mt-1 text-sm text-gray-600">
+                      Leave your details and we will get
+                      back to you.
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setShowHandoffForm(false)
+                      }
+                      disabled={isSubmittingHandoff}
+                      aria-label="Close contact form"
+                      className="absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-full text-red-500 transition hover:bg-red-100 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <X
+                        size={21}
+                        strokeWidth={2.5}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    <input
+                      type="text"
+                      placeholder="Your name"
+                      value={handoffName}
+                      disabled={isSubmittingHandoff}
+                      maxLength={100}
+                      onChange={(event) =>
+                        setHandoffName(
+                          event.target.value
+                        )
+                      }
+                      className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-gray-900 placeholder:text-gray-500 outline-none transition focus:border-gray-700 focus:ring-2 focus:ring-gray-200 disabled:cursor-not-allowed disabled:bg-gray-100"
                     />
-                  </button>
+
+                    <input
+                      type="email"
+                      placeholder="Email address (optional)"
+                      value={handoffEmail}
+                      disabled={isSubmittingHandoff}
+                      maxLength={254}
+                      onChange={(event) =>
+                        setHandoffEmail(
+                          event.target.value
+                        )
+                      }
+                      className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-gray-900 placeholder:text-gray-500 outline-none transition focus:border-gray-700 focus:ring-2 focus:ring-gray-200 disabled:cursor-not-allowed disabled:bg-gray-100"
+                    />
+
+                    <input
+                      type="tel"
+                      placeholder="Phone number (optional)"
+                      value={handoffPhone}
+                      disabled={isSubmittingHandoff}
+                      maxLength={30}
+                      onChange={(event) =>
+                        setHandoffPhone(
+                          event.target.value
+                        )
+                      }
+                      className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-gray-900 placeholder:text-gray-500 outline-none transition focus:border-gray-700 focus:ring-2 focus:ring-gray-200 disabled:cursor-not-allowed disabled:bg-gray-100"
+                    />
+
+                    <p className="text-xs text-gray-500">
+                      Enter at least an email address or a
+                      phone number.
+                    </p>
+
+                    <textarea
+                      placeholder="How can we help you?"
+                      rows={4}
+                      value={handoffMessage}
+                      disabled={isSubmittingHandoff}
+                      maxLength={1000}
+                      onChange={(event) =>
+                        setHandoffMessage(
+                          event.target.value
+                        )
+                      }
+                      className="w-full resize-none rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-gray-900 placeholder:text-gray-500 outline-none transition focus:border-gray-700 focus:ring-2 focus:ring-gray-200 disabled:cursor-not-allowed disabled:bg-gray-100"
+                    />
+
+                    <label className="flex items-start gap-3 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={handoffConsent}
+                        disabled={isSubmittingHandoff}
+                        onChange={(event) =>
+                          setHandoffConsent(
+                            event.target.checked
+                          )
+                        }
+                        className="mt-1 h-4 w-4 rounded border-gray-300"
+                      />
+
+                      <span>
+                        I agree that Montana Barber may
+                        contact me using the information
+                        provided.
+                      </span>
+                    </label>
+
+                    {handoffError && (
+                      <p
+                        role="alert"
+                        className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+                      >
+                        {handoffError}
+                      </p>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={handleHandoffSubmit}
+                      disabled={isSubmittingHandoff}
+                      className="w-full rounded-xl bg-gray-900 px-4 py-3 font-medium text-white transition hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isSubmittingHandoff
+                        ? "Sending..."
+                        : "Send request"}
+                    </button>
+                  </div>
                 </div>
-
-                <div className="space-y-3">
-                  <input
-                    type="text"
-                    placeholder="Your name"
-                    value={handoffName}
-                    onChange={(event) =>
-                      setHandoffName(
-                        event.target.value
-                      )
-                    }
-                    className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-gray-900 placeholder:text-gray-500 outline-none transition focus:border-gray-700 focus:ring-2 focus:ring-gray-200"
-                  />
-
-                  <input
-                    type="email"
-                    placeholder="Your email"
-                    value={handoffEmail}
-                    onChange={(event) =>
-                      setHandoffEmail(
-                        event.target.value
-                      )
-                    }
-                    className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-gray-900 placeholder:text-gray-500 outline-none transition focus:border-gray-700 focus:ring-2 focus:ring-gray-200"
-                  />
-
-                  <input
-                    type="tel"
-                    placeholder="Phone number (optional)"
-                    value={handoffPhone}
-                    onChange={(event) =>
-                      setHandoffPhone(
-                        event.target.value
-                      )
-                    }
-                    className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-gray-900 placeholder:text-gray-500 outline-none transition focus:border-gray-700 focus:ring-2 focus:ring-gray-200"
-                  />
-
-                  <textarea
-                    placeholder="How can we help you?"
-                    rows={4}
-                    value={handoffMessage}
-                    onChange={(event) =>
-                      setHandoffMessage(
-                        event.target.value
-                      )
-                    }
-                    className="w-full resize-none rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-gray-900 placeholder:text-gray-500 outline-none transition focus:border-gray-700 focus:ring-2 focus:ring-gray-200"
-                  />
-
-                  <button
-                    type="button"
-                    onClick={handleHandoffSubmit}
-                    className="w-full rounded-xl bg-gray-900 px-4 py-3 font-medium text-white transition hover:bg-gray-700"
-                  >
-                    Send request
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
           <div ref={messagesEndRef} />
         </section>
@@ -606,8 +829,14 @@ export default function Home() {
               onChange={(event) =>
                 setInput(event.target.value)
               }
-              placeholder="Type your message..."
-              disabled={isLoading}
+              placeholder={
+                hasLoadedMessages
+                  ? "Type your message..."
+                  : "Loading conversation..."
+              }
+              disabled={
+                isLoading || !hasLoadedMessages
+              }
               maxLength={1000}
               className="flex-1 rounded-xl border border-gray-300 bg-white px-4 py-3 text-gray-900 placeholder:text-gray-500 outline-none focus:border-gray-600 disabled:bg-gray-100"
             />
@@ -623,7 +852,10 @@ export default function Home() {
             ) : (
               <button
                 type="submit"
-                disabled={!input.trim()}
+                disabled={
+                  !input.trim() ||
+                  !hasLoadedMessages
+                }
                 className="rounded-xl bg-gray-900 px-5 py-3 font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Send

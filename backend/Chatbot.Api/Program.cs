@@ -2,11 +2,21 @@ using Chatbot.Api.Configuration;
 using Chatbot.Api.Interfaces;
 using Chatbot.Api.Middleware;
 using Chatbot.Api.Services;
+using Chatbot.Api.Data;
+using Microsoft.EntityFrameworkCore;
+using Resend;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Controllers
 builder.Services.AddControllers();
+//Database
+builder.Services.AddDbContext<ChatbotDbContext>(options =>
+    options.UseSqlite(
+        builder.Configuration.GetConnectionString("DefaultConnection")
+        ?? throw new InvalidOperationException("Connection string 'DefaultConnection' was not found")
+    )
+);
 
 // OpenAI configuration
 builder.Services
@@ -17,6 +27,43 @@ builder.Services
         "The OpenAI API key is missing."
     )
     .ValidateOnStart();
+
+
+// Lead notification configuration
+builder.Services
+    .AddOptions<LeadNotificationOptions>()
+    .Bind(
+        builder.Configuration.GetSection(
+            LeadNotificationOptions.SectionName
+        )
+    )
+    .Validate(
+        options =>
+            !options.Enabled ||
+            (
+                !string.IsNullOrWhiteSpace(options.FromEmail) &&
+                !string.IsNullOrWhiteSpace(options.FromName) &&
+                !string.IsNullOrWhiteSpace(options.RecipientEmail)
+            ),
+        "Lead notification email settings are required when notifications are enabled."
+    )
+    .Validate(
+    options =>
+        !options.Enabled ||
+        !string.IsNullOrWhiteSpace(
+            builder.Configuration["RESEND_APITOKEN"]
+        ),
+    "The Resend API token is required when lead notifications are enabled."
+)
+
+    .ValidateOnStart();
+
+builder.Services.AddResend(options =>
+{
+    options.ApiToken =
+        builder.Configuration["RESEND_APITOKEN"]
+        ?? string.Empty;
+});
 
 // CORS
 builder.Services.AddCors(options =>
@@ -53,6 +100,15 @@ builder.Services.AddSingleton<
 builder.Services.AddSingleton<IPromptService, PromptService>();
 
 builder.Services.AddScoped<IHandoffService, HandoffService>();
+builder.Services.AddScoped<
+    IConversationService,
+    ConversationService
+>();
+builder.Services.AddScoped<ILeadService, LeadService>();
+builder.Services.AddScoped<
+    ILeadNotificationService,
+    LeadNotificationService
+>();
 
 builder.Services
     .AddHttpClient<IChatService, ChatService>(client =>
@@ -90,3 +146,5 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+public partial class Program;
